@@ -1,0 +1,36 @@
+# Builds a Tensorhelm image inside OpenShift from a local directory (oc start-build --from-dir), so no external
+# registry or local container tool is needed. Used for the API, the web portal and the spoke agent.
+apiVersion: template.openshift.io/v1
+kind: Template
+metadata:
+  name: tensorhelm-build
+  annotations:
+    description: Binary Docker build of one Tensorhelm image into the cluster's internal registry.
+parameters:
+  - name: NAME
+    description: Image and BuildConfig name, for example tensorhelm-api
+    required: true
+objects:
+  - apiVersion: image.openshift.io/v1
+    kind: ImageStream
+    metadata:
+      name: ${NAME}
+      labels: {app.kubernetes.io/part-of: tensorhelm}
+    spec:
+      lookupPolicy: {local: true}
+  - apiVersion: build.openshift.io/v1
+    kind: BuildConfig
+    metadata:
+      name: ${NAME}
+      labels: {app.kubernetes.io/part-of: tensorhelm}
+    spec:
+      runPolicy: Serial
+      source: {type: Binary}
+      strategy:
+        type: Docker
+        dockerStrategy: {dockerfilePath: Containerfile}
+      output:
+        to: {kind: ImageStreamTag, name: "${NAME}:latest"}
+      resources:
+        requests: {cpu: 500m, memory: 1Gi}
+        limits: {memory: 4Gi}

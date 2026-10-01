@@ -1,0 +1,47 @@
+# Built-in starter catalog. Shapes are taken from each model's config.json on Hugging Face and are
+# refreshed from Hugging Face at runtime when the hub can reach it. Edit this file or point the catalog
+# at the OpenShift AI Model Registry to manage your own list.
+- id: ibm-granite/granite-3.3-8b-instruct
+  name: Granite 3.3 8B Instruct
+  provider: IBM
+  license: Apache-2.0
+  task: chat
+  context: 131072
+  shape: {params_b: 8.2, layers: 40, kv_heads: 8, head_dim: 128, attention_heads: 32}
+- id: meta-llama/Llama-3.1-8B-Instruct
+  name: Llama 3.1 8B Instruct
+  provider: Meta
+  license: Llama 3.1 Community
+  gated: true
+  task: chat
+  context: 131072
+  shape: {params_b: 8.0, layers: 32, kv_heads: 8, head_dim: 128, attention_heads: 32}
+- id: meta-llama/Llama-3.1-70B-Instruct
+  name: Llama 3.1 70B Instruct
+  provider: Meta
+  license: Llama 3.1 Community
+  gated: true
+  task: chat
+  context: 131072
+  shape: {params_b: 70.6, layers: 80, kv_heads: 8, head_dim: 128, attention_heads: 64}
+- id: mistralai/Mistral-Small-24B-Instruct-2501
+  name: Mistral Small 24B Instruct
+  provider: Mistral AI
+  license: Apache-2.0
+  task: chat
+  context: 32768
+  shape: {params_b: 23.6, layers: 40, kv_heads: 8, head_dim: 128, attention_heads: 32}
+- id: Qwen/Qwen2.5-Coder-32B-Instruct
+  name: Qwen2.5 Coder 32B Instruct
+  provider: Alibaba Qwen
+  license: Apache-2.0
+  task: code
+  context: 32768
+  shape: {params_b: 32.8, layers: 64, kv_heads: 8, head_dim: 128, attention_heads: 40}
+- id: Qwen/Qwen2.5-7B-Instruct
+  name: Qwen2.5 7B Instruct
+  provider: Alibaba Qwen
+  license: Apache-2.0
+  task: chat
+  context: 32768
+  shape: {params_b: 7.6, layers: 28, kv_heads: 4, head_dim: 128, attention_heads: 28}

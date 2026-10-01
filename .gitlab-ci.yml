@@ -1,0 +1,26 @@
+# Same checks as .github/workflows/ci.yml, for teams that mirror this repository into GitLab.
+stages: [test]
+
+api:
+  stage: test
+  image: registry.access.redhat.com/ubi9/python-312:latest
+  script:
+    - cd services/api
+    - pip install -e '.[dev]'
+    - ruff check .
+    - ruff format --check .
+    - pytest -q
+
+web:
+  stage: test
+  image: registry.access.redhat.com/ubi9/nodejs-22:latest
+  script:
+    - cd services/web
+    - npm ci
+    - npm run build
+
+scripts:
+  stage: test
+  image: koalaman/shellcheck-alpine:stable
+  script:
+    - shellcheck -S warning scripts/*.sh

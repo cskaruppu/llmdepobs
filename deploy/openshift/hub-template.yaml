@@ -1,0 +1,366 @@
+# Tensorhelm hub: PostgreSQL, the API and the portal behind the OpenShift oauth-proxy.
+# Applied by scripts/install.sh. Secrets are created by the script (never by this template), so re-applying it
+# never rotates passwords.
+apiVersion: template.openshift.io/v1
+kind: Template
+metadata:
+  name: tensorhelm-hub
+  annotations:
+    description: Tensorhelm hub portal and API for OpenShift and OpenShift AI.
+parameters:
+  - {name: NAMESPACE, required: true, value: tensorhelm}
+  - {name: PORTAL_HOST, description: "Route host for the portal", required: true}
+  - {name: AGENT_HOST, description: "Route host spoke agents connect to", required: true}
+  - {name: API_IMAGE, required: true}
+  - {name: WEB_IMAGE, required: true}
+  - {name: OAUTH_PROXY_IMAGE, required: true}
+  - {name: POSTGRES_IMAGE, value: "registry.redhat.io/rhel9/postgresql-16:latest"}
+  - {name: DB_STORAGE, value: 20Gi}
+  - {name: STORAGE_CLASS, description: "Empty for the default StorageClass", value: ""}
+  - {name: HUB_CLUSTER_NAME, value: local-cluster}
+  - {name: DELIVERY_MODE, value: direct}
+  - {name: GITLAB_URL, value: ""}
+  - {name: GITLAB_PROJECT, value: ""}
+  - {name: GITLAB_BRANCH, value: main}
+  - {name: MODEL_REGISTRY_URL, value: ""}
+  - {name: OPENROUTER_ENABLED, value: "false"}
+  - {name: RHOAI_APPLICATIONS_NAMESPACE, value: redhat-ods-applications}
+  - {name: ADMIN_GROUPS, value: tensorhelm-admins}
+  - {name: ENGINEER_GROUPS, value: tensorhelm-engineers}
+  - {name: VLLM_IMAGE, description: "Fallback vLLM image when OpenShift AI has no vLLM template", value: ""}
+objects:
+  # ---- identities and permissions ----------------------------------------------------------------------------
+  - apiVersion: v1
+    kind: ServiceAccount
+    metadata:
+      name: tensorhelm-api
+      labels: {app.kubernetes.io/part-of: tensorhelm}
+  - apiVersion: v1
+    kind: ServiceAccount
+    metadata:
+      name: tensorhelm-web
+      labels: {app.kubernetes.io/part-of: tensorhelm}
+      annotations:
+        serviceaccounts.openshift.io/oauth-redirectreference.primary: >-
+          {"kind":"OAuthRedirectReference","apiVersion":"v1","reference":{"kind":"Route","name":"tensorhelm"}}
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRole
+    metadata:
+      name: tensorhelm-hub-${NAMESPACE}
+      labels: {app.kubernetes.io/part-of: tensorhelm}
+    rules:
+      - apiGroups: [""]
+        resources: [nodes, pods]
+        verbs: [get, list, watch]
+      - apiGroups: [""]
+        resources: [namespaces]
+        verbs: [get, list, create]
+      - apiGroups: [serving.kserve.io]
+        resources: [inferenceservices, servingruntimes]
+        verbs: [get, list, watch, create, update, patch, delete]
+      - apiGroups: [template.openshift.io]
+        resources: [templates]
+        verbs: [get, list]
+      - apiGroups: [datasciencecluster.opendatahub.io]
+        resources: [datascienceclusters]
+        verbs: [get, list]
+      - apiGroups: [config.openshift.io]
+        resources: [clusterversions, infrastructures]
+        verbs: [get, list]
+      - apiGroups: [cluster.open-cluster-management.io]
+        resources: [managedclusters]
+        verbs: [get, list, watch]
+      - apiGroups: [discovery.open-cluster-management.io]
+        resources: [discoveredclusters]
+        verbs: [get, list]
+      - apiGroups: [user.openshift.io]
+        resources: [groups]
+        verbs: [get, list]
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    metadata:
+      name: tensorhelm-hub-${NAMESPACE}
+      labels: {app.kubernetes.io/part-of: tensorhelm}
+    roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: "tensorhelm-hub-${NAMESPACE}"}
+    subjects:
+      - {kind: ServiceAccount, name: tensorhelm-api, namespace: "${NAMESPACE}"}
+  # Who may sign in to the portal: the oauth-proxy checks that the user can "get" this Service.
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: Role
+    metadata:
+      name: tensorhelm-portal-user
+      labels: {app.kubernetes.io/part-of: tensorhelm}
+    rules:
+      - apiGroups: [""]
+        resources: [services]
+        resourceNames: [tensorhelm-web]
+        verbs: [get]
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata:
+      name: tensorhelm-portal-users
+      labels: {app.kubernetes.io/part-of: tensorhelm}
+    roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: tensorhelm-portal-user}
+    subjects:
+      - {apiGroup: rbac.authorization.k8s.io, kind: Group, name: tensorhelm-admins}
+      - {apiGroup: rbac.authorization.k8s.io, kind: Group, name: tensorhelm-engineers}
+      - {apiGroup: rbac.authorization.k8s.io, kind: Group, name: tensorhelm-viewers}
+
+  # ---- database ------------------------------------------------------------------------------------------------
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      name: tensorhelm-db
+      labels: {app: tensorhelm-db, app.kubernetes.io/part-of: tensorhelm}
+    spec:
+      selector: {app: tensorhelm-db}
+      ports: [{name: postgres, port: 5432, targetPort: 5432}]
+  - apiVersion: apps/v1
+    kind: StatefulSet
+    metadata:
+      name: tensorhelm-db
+      labels: {app: tensorhelm-db, app.kubernetes.io/part-of: tensorhelm}
+    spec:
+      serviceName: tensorhelm-db
+      replicas: 1
+      selector: {matchLabels: {app: tensorhelm-db}}
+      template:
+        metadata:
+          labels: {app: tensorhelm-db, app.kubernetes.io/part-of: tensorhelm}
+        spec:
+          containers:
+            - name: postgresql
+              image: ${POSTGRES_IMAGE}
+              ports: [{containerPort: 5432}]
+              env:
+                - {name: POSTGRESQL_DATABASE, value: tensorhelm}
+                - name: POSTGRESQL_USER
+                  valueFrom: {secretKeyRef: {name: tensorhelm-db, key: user}}
+                - name: POSTGRESQL_PASSWORD
+                  valueFrom: {secretKeyRef: {name: tensorhelm-db, key: password}}
+              readinessProbe:
+                exec: {command: [/usr/libexec/check-container]}
+                initialDelaySeconds: 5
+                periodSeconds: 10
+              livenessProbe:
+                exec: {command: [/usr/libexec/check-container, --live]}
+                initialDelaySeconds: 120
+                periodSeconds: 20
+              resources:
+                requests: {cpu: 250m, memory: 512Mi}
+                limits: {memory: 2Gi}
+              volumeMounts: [{name: data, mountPath: /var/lib/pgsql/data}]
+      volumeClaimTemplates:
+        - metadata: {name: data}
+          spec:
+            accessModes: [ReadWriteOnce]
+            storageClassName: ${STORAGE_CLASS}
+            resources: {requests: {storage: "${DB_STORAGE}"}}
+
+  # ---- API -----------------------------------------------------------------------------------------------------
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      name: tensorhelm-api
+      labels: {app: tensorhelm-api, app.kubernetes.io/part-of: tensorhelm}
+    spec:
+      selector: {app: tensorhelm-api}
+      ports: [{name: http, port: 8000, targetPort: 8000}]
+  - apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: tensorhelm-api
+      labels: {app: tensorhelm-api, app.kubernetes.io/part-of: tensorhelm}
+    spec:
+      replicas: 1
+      selector: {matchLabels: {app: tensorhelm-api}}
+      strategy: {type: Recreate}
+      template:
+        metadata:
+          labels: {app: tensorhelm-api, app.kubernetes.io/part-of: tensorhelm}
+        spec:
+          serviceAccountName: tensorhelm-api
+          containers:
+            - name: api
+              image: ${API_IMAGE}
+              imagePullPolicy: Always
+              command: [tensorhelm-api]
+              ports: [{containerPort: 8000}]
+              env:
+                - name: DB_USER
+                  valueFrom: {secretKeyRef: {name: tensorhelm-db, key: user}}
+                - name: DB_PASSWORD
+                  valueFrom: {secretKeyRef: {name: tensorhelm-db, key: password}}
+                - {name: TH_DATABASE_URL, value: "postgresql+asyncpg://$(DB_USER):$(DB_PASSWORD)@tensorhelm-db:5432/tensorhelm"}
+                - {name: TH_AUTH_MODE, value: proxy}
+                - name: TH_PROXY_SHARED_SECRET
+                  valueFrom: {secretKeyRef: {name: tensorhelm-proxy, key: shared-secret}}
+                - name: TH_AGENT_BOOTSTRAP_TOKEN
+                  valueFrom: {secretKeyRef: {name: tensorhelm-agent-bootstrap, key: token}}
+                - {name: TH_AGENT_PUBLIC_URL, value: "https://${AGENT_HOST}"}
+                - {name: TH_HUB_CLUSTER_NAME, value: "${HUB_CLUSTER_NAME}"}
+                - {name: TH_ADMIN_GROUPS, value: "${ADMIN_GROUPS}"}
+                - {name: TH_ENGINEER_GROUPS, value: "${ENGINEER_GROUPS}"}
+                - {name: TH_RHOAI_APPLICATIONS_NAMESPACE, value: "${RHOAI_APPLICATIONS_NAMESPACE}"}
+                - {name: TH_DELIVERY_MODE, value: "${DELIVERY_MODE}"}
+                - {name: TH_GITLAB_URL, value: "${GITLAB_URL}"}
+                - {name: TH_GITLAB_PROJECT, value: "${GITLAB_PROJECT}"}
+                - {name: TH_GITLAB_BRANCH, value: "${GITLAB_BRANCH}"}
+                - name: TH_GITLAB_TOKEN
+                  valueFrom: {secretKeyRef: {name: tensorhelm-integrations, key: gitlab-token, optional: true}}
+                - name: TH_HUGGINGFACE_TOKEN
+                  valueFrom: {secretKeyRef: {name: tensorhelm-integrations, key: huggingface-token, optional: true}}
+                - {name: TH_MODEL_REGISTRY_URL, value: "${MODEL_REGISTRY_URL}"}
+                - name: TH_MODEL_REGISTRY_TOKEN
+                  valueFrom: {secretKeyRef: {name: tensorhelm-integrations, key: model-registry-token, optional: true}}
+                - {name: TH_OPENROUTER_ENABLED, value: "${OPENROUTER_ENABLED}"}
+                - {name: TH_VLLM_IMAGE, value: "${VLLM_IMAGE}"}
+              readinessProbe:
+                httpGet: {path: /api/v1/health/ready, port: 8000}
+                periodSeconds: 10
+              livenessProbe:
+                httpGet: {path: /api/v1/health/live, port: 8000}
+                initialDelaySeconds: 20
+                periodSeconds: 20
+              resources:
+                requests: {cpu: 200m, memory: 256Mi}
+                limits: {memory: 1Gi}
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: {drop: [ALL]}
+
+  # ---- portal: oauth-proxy + nginx -------------------------------------------------------------------------------
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      name: tensorhelm-web
+      labels: {app: tensorhelm-web, app.kubernetes.io/part-of: tensorhelm}
+      annotations:
+        service.beta.openshift.io/serving-cert-secret-name: tensorhelm-web-tls
+    spec:
+      selector: {app: tensorhelm-web}
+      ports: [{name: https, port: 8443, targetPort: 8443}]
+  - apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: tensorhelm-web
+      labels: {app: tensorhelm-web, app.kubernetes.io/part-of: tensorhelm}
+    spec:
+      replicas: 2
+      selector: {matchLabels: {app: tensorhelm-web}}
+      template:
+        metadata:
+          labels: {app: tensorhelm-web, app.kubernetes.io/part-of: tensorhelm}
+        spec:
+          serviceAccountName: tensorhelm-web
+          containers:
+            - name: oauth-proxy
+              image: ${OAUTH_PROXY_IMAGE}
+              args:
+                - --https-address=:8443
+                - --provider=openshift
+                - --openshift-service-account=tensorhelm-web
+                - --upstream=http://localhost:8080
+                - --tls-cert=/etc/tls/private/tls.crt
+                - --tls-key=/etc/tls/private/tls.key
+                - --cookie-secret-file=/etc/proxy/secrets/session-secret
+                - --cookie-secure=true
+                - '--openshift-sar={"namespace":"${NAMESPACE}","resource":"services","resourceName":"tensorhelm-web","verb":"get"}'
+                - --skip-auth-regex=^/healthz$
+              ports: [{name: https, containerPort: 8443}]
+              readinessProbe:
+                httpGet: {path: /oauth/healthz, port: 8443, scheme: HTTPS}
+                periodSeconds: 10
+              resources:
+                requests: {cpu: 50m, memory: 64Mi}
+                limits: {memory: 256Mi}
+              volumeMounts:
+                - {name: tls, mountPath: /etc/tls/private, readOnly: true}
+                - {name: proxy, mountPath: /etc/proxy/secrets, readOnly: true}
+            - name: web
+              image: ${WEB_IMAGE}
+              imagePullPolicy: Always
+              ports: [{containerPort: 8080}]
+              readinessProbe:
+                httpGet: {path: /healthz, port: 8080}
+                periodSeconds: 10
+              resources:
+                requests: {cpu: 50m, memory: 64Mi}
+                limits: {memory: 256Mi}
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: {drop: [ALL]}
+              volumeMounts:
+                - {name: proxy-conf, mountPath: /etc/tensorhelm, readOnly: true}
+          volumes:
+            - name: tls
+              secret: {secretName: tensorhelm-web-tls}
+            - name: proxy
+              secret:
+                secretName: tensorhelm-proxy
+                items: [{key: session-secret, path: session-secret}]
+            - name: proxy-conf
+              secret:
+                secretName: tensorhelm-proxy
+                items: [{key: proxy-secret.conf, path: proxy-secret.conf}]
+
+  # ---- routes ----------------------------------------------------------------------------------------------------
+  - apiVersion: route.openshift.io/v1
+    kind: Route
+    metadata:
+      name: tensorhelm
+      labels: {app.kubernetes.io/part-of: tensorhelm}
+    spec:
+      host: ${PORTAL_HOST}
+      to: {kind: Service, name: tensorhelm-web}
+      port: {targetPort: https}
+      tls: {termination: reencrypt, insecureEdgeTerminationPolicy: Redirect}
+  # Spoke agents reach only the agent endpoints, authenticated with their own tokens.
+  - apiVersion: route.openshift.io/v1
+    kind: Route
+    metadata:
+      name: tensorhelm-agent
+      labels: {app.kubernetes.io/part-of: tensorhelm}
+    spec:
+      host: ${AGENT_HOST}
+      path: /api/v1/agent
+      to: {kind: Service, name: tensorhelm-api}
+      port: {targetPort: http}
+      tls: {termination: edge, insecureEdgeTerminationPolicy: Redirect}
+
+  # ---- network policies --------------------------------------------------------------------------------------------
+  - apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: tensorhelm-db
+      labels: {app.kubernetes.io/part-of: tensorhelm}
+    spec:
+      podSelector: {matchLabels: {app: tensorhelm-db}}
+      policyTypes: [Ingress]
+      ingress:
+        - from: [{podSelector: {matchLabels: {app: tensorhelm-api}}}]
+          ports: [{port: 5432}]
+  - apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: tensorhelm-api
+      labels: {app.kubernetes.io/part-of: tensorhelm}
+    spec:
+      podSelector: {matchLabels: {app: tensorhelm-api}}
+      policyTypes: [Ingress]
+      ingress:
+        - from:
+            - podSelector: {matchLabels: {app: tensorhelm-web}}
+            - namespaceSelector: {matchLabels: {network.openshift.io/policy-group: ingress}}
+          ports: [{port: 8000}]
+  - apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: tensorhelm-web
+      labels: {app.kubernetes.io/part-of: tensorhelm}
+    spec:
+      podSelector: {matchLabels: {app: tensorhelm-web}}
+      policyTypes: [Ingress]
+      ingress:
+        - from: [{namespaceSelector: {matchLabels: {network.openshift.io/policy-group: ingress}}}]
+          ports: [{port: 8443}]

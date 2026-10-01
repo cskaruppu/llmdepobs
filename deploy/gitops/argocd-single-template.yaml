@@ -1,0 +1,29 @@
+# GitOps delivery to the hub cluster only (no RHACM). Syncs deployments/<hub-name>/ into this cluster.
+apiVersion: template.openshift.io/v1
+kind: Template
+metadata:
+  name: tensorhelm-argocd-single
+parameters:
+  - {name: REPO_URL, required: true}
+  - {name: BRANCH, value: main}
+  - {name: PATH_PREFIX, value: deployments}
+  - {name: HUB_CLUSTER_NAME, value: local-cluster}
+  - {name: GITOPS_NAMESPACE, value: openshift-gitops}
+objects:
+  - apiVersion: argoproj.io/v1alpha1
+    kind: Application
+    metadata:
+      name: tensorhelm-${HUB_CLUSTER_NAME}
+      namespace: ${GITOPS_NAMESPACE}
+    spec:
+      project: default
+      source:
+        repoURL: ${REPO_URL}
+        targetRevision: ${BRANCH}
+        path: ${PATH_PREFIX}/${HUB_CLUSTER_NAME}
+        directory: {recurse: true}
+      destination:
+        server: https://kubernetes.default.svc
+      syncPolicy:
+        automated: {prune: true, selfHeal: true}
+        retry: {limit: 5, backoff: {duration: 30s, maxDuration: 5m}}

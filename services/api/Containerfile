@@ -1,0 +1,12 @@
+# Tensorhelm hub API and spoke agent (same image, different command).
+FROM registry.access.redhat.com/ubi9/python-312:latest
+
+WORKDIR /opt/app-root/src
+COPY --chown=1001:0 pyproject.toml ./
+COPY --chown=1001:0 tensorhelm ./tensorhelm
+RUN pip install --no-cache-dir . && rm -rf build *.egg-info
+
+USER 1001
+EXPOSE 8000
+ENV PYTHONUNBUFFERED=1
+CMD ["tensorhelm-api"]

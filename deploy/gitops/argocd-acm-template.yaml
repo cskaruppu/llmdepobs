@@ -1,0 +1,83 @@
+# GitOps delivery across RHACM managed clusters. One Argo CD Application per cluster labelled
+# tensorhelm.io/managed=true, syncing deployments/<cluster>/ from the GitOps repository.
+# Applied by scripts/install.sh --delivery gitops when RHACM is installed on the hub.
+apiVersion: template.openshift.io/v1
+kind: Template
+metadata:
+  name: tensorhelm-argocd-acm
+parameters:
+  - {name: REPO_URL, required: true}
+  - {name: BRANCH, value: main}
+  - {name: PATH_PREFIX, value: deployments}
+  - {name: GITOPS_NAMESPACE, value: openshift-gitops}
+  - {name: CLUSTER_SET, value: default}
+objects:
+  - apiVersion: cluster.open-cluster-management.io/v1beta2
+    kind: ManagedClusterSetBinding
+    metadata:
+      name: ${CLUSTER_SET}
+      namespace: ${GITOPS_NAMESPACE}
+    spec:
+      clusterSet: ${CLUSTER_SET}
+  - apiVersion: cluster.open-cluster-management.io/v1beta1
+    kind: Placement
+    metadata:
+      name: tensorhelm-serving
+      namespace: ${GITOPS_NAMESPACE}
+    spec:
+      clusterSets: ["${CLUSTER_SET}"]
+      predicates:
+        - requiredClusterSelector:
+            labelSelector:
+              matchLabels: {tensorhelm.io/managed: "true"}
+  - apiVersion: apps.open-cluster-management.io/v1beta1
+    kind: GitOpsCluster
+    metadata:
+      name: tensorhelm-serving
+      namespace: ${GITOPS_NAMESPACE}
+    spec:
+      argoServer:
+        cluster: local-cluster
+        argoNamespace: ${GITOPS_NAMESPACE}
+      placementRef:
+        kind: Placement
+        apiVersion: cluster.open-cluster-management.io/v1beta1
+        name: tensorhelm-serving
+  - apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: acm-placement
+      namespace: ${GITOPS_NAMESPACE}
+    data:
+      apiVersion: cluster.open-cluster-management.io/v1beta1
+      kind: placementdecisions
+      statusListKey: decisions
+      matchKey: clusterName
+  - apiVersion: argoproj.io/v1alpha1
+    kind: ApplicationSet
+    metadata:
+      name: tensorhelm-deployments
+      namespace: ${GITOPS_NAMESPACE}
+    spec:
+      generators:
+        - clusterDecisionResource:
+            configMapRef: acm-placement
+            labelSelector:
+              matchLabels:
+                cluster.open-cluster-management.io/placement: tensorhelm-serving
+            requeueAfterSeconds: 180
+      template:
+        metadata:
+          name: "tensorhelm-{{name}}"
+        spec:
+          project: default
+          source:
+            repoURL: ${REPO_URL}
+            targetRevision: ${BRANCH}
+            path: "${PATH_PREFIX}/{{name}}"
+            directory: {recurse: true}
+          destination:
+            server: "{{server}}"
+          syncPolicy:
+            automated: {prune: true, selfHeal: true}
+            retry: {limit: 5, backoff: {duration: 30s, maxDuration: 5m}}

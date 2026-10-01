@@ -1,0 +1,127 @@
+# Tensorhelm spoke agent. Apply on each managed cluster (scripts/register-cluster.sh does this for you).
+# It only reads the cluster, and connects out to the hub; it accepts no inbound traffic.
+apiVersion: template.openshift.io/v1
+kind: Template
+metadata:
+  name: tensorhelm-agent
+  annotations:
+    description: Reports GPU nodes, model endpoints and serving runtimes of this cluster to the Tensorhelm hub.
+parameters:
+  - {name: NAMESPACE, value: tensorhelm-agent}
+  - {name: CLUSTER_NAME, description: "Name shown in the portal; use the RHACM managed cluster name", required: true}
+  - {name: HUB_URL, description: "https://<agent route host> on the hub", required: true}
+  - {name: BOOTSTRAP_TOKEN, description: "Value of the tensorhelm-agent-bootstrap Secret on the hub", required: true}
+  - {name: AGENT_IMAGE, required: true}
+  - {name: AGENT_LABELS, description: "Comma-separated key=value labels used for placement", value: ""}
+  - {name: INSECURE_SKIP_VERIFY, description: "true only for labs with self-signed router certificates", value: "false"}
+  - {name: RHOAI_APPLICATIONS_NAMESPACE, value: redhat-ods-applications}
+objects:
+  - apiVersion: v1
+    kind: Secret
+    metadata:
+      name: tensorhelm-agent-bootstrap
+      namespace: ${NAMESPACE}
+      labels: {app.kubernetes.io/part-of: tensorhelm}
+    stringData:
+      token: ${BOOTSTRAP_TOKEN}
+  - apiVersion: v1
+    kind: ServiceAccount
+    metadata:
+      name: tensorhelm-agent
+      namespace: ${NAMESPACE}
+      labels: {app.kubernetes.io/part-of: tensorhelm}
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRole
+    metadata:
+      name: tensorhelm-agent
+      labels: {app.kubernetes.io/part-of: tensorhelm}
+    rules:
+      - apiGroups: [""]
+        resources: [nodes, pods]
+        verbs: [get, list]
+      - apiGroups: [serving.kserve.io]
+        resources: [inferenceservices]
+        verbs: [get, list]
+      - apiGroups: [template.openshift.io]
+        resources: [templates]
+        verbs: [get, list]
+      - apiGroups: [datasciencecluster.opendatahub.io]
+        resources: [datascienceclusters]
+        verbs: [get, list]
+      - apiGroups: [config.openshift.io]
+        resources: [clusterversions, infrastructures]
+        verbs: [get]
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    metadata:
+      name: tensorhelm-agent
+      labels: {app.kubernetes.io/part-of: tensorhelm}
+    roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: tensorhelm-agent}
+    subjects: [{kind: ServiceAccount, name: tensorhelm-agent, namespace: "${NAMESPACE}"}]
+  # The agent stores the cluster token it receives from the hub in its own Secret.
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: Role
+    metadata:
+      name: tensorhelm-agent-credentials
+      namespace: ${NAMESPACE}
+      labels: {app.kubernetes.io/part-of: tensorhelm}
+    rules:
+      - apiGroups: [""]
+        resources: [secrets]
+        verbs: [create]
+      - apiGroups: [""]
+        resources: [secrets]
+        resourceNames: [tensorhelm-agent-credentials]
+        verbs: [get, update]
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata:
+      name: tensorhelm-agent-credentials
+      namespace: ${NAMESPACE}
+      labels: {app.kubernetes.io/part-of: tensorhelm}
+    roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: tensorhelm-agent-credentials}
+    subjects: [{kind: ServiceAccount, name: tensorhelm-agent, namespace: "${NAMESPACE}"}]
+  - apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: tensorhelm-agent
+      namespace: ${NAMESPACE}
+      labels: {app: tensorhelm-agent, app.kubernetes.io/part-of: tensorhelm}
+    spec:
+      replicas: 1
+      strategy: {type: Recreate}
+      selector: {matchLabels: {app: tensorhelm-agent}}
+      template:
+        metadata:
+          labels: {app: tensorhelm-agent, app.kubernetes.io/part-of: tensorhelm}
+        spec:
+          serviceAccountName: tensorhelm-agent
+          containers:
+            - name: agent
+              image: ${AGENT_IMAGE}
+              imagePullPolicy: Always
+              command: [tensorhelm-agent]
+              env:
+                - {name: TH_AGENT_HUB_URL, value: "${HUB_URL}"}
+                - {name: TH_AGENT_CLUSTER_NAME, value: "${CLUSTER_NAME}"}
+                - {name: TH_AGENT_NAMESPACE, value: "${NAMESPACE}"}
+                - {name: TH_AGENT_LABELS, value: "${AGENT_LABELS}"}
+                - {name: TH_AGENT_INSECURE_SKIP_VERIFY, value: "${INSECURE_SKIP_VERIFY}"}
+                - {name: TH_RHOAI_APPLICATIONS_NAMESPACE, value: "${RHOAI_APPLICATIONS_NAMESPACE}"}
+                - name: TH_AGENT_BOOTSTRAP_TOKEN
+                  valueFrom: {secretKeyRef: {name: tensorhelm-agent-bootstrap, key: token}}
+              resources:
+                requests: {cpu: 20m, memory: 96Mi}
+                limits: {memory: 256Mi}
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: {drop: [ALL]}
+  - apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: tensorhelm-agent-no-ingress
+      namespace: ${NAMESPACE}
+      labels: {app.kubernetes.io/part-of: tensorhelm}
+    spec:
+      podSelector: {matchLabels: {app: tensorhelm-agent}}
+      policyTypes: [Ingress]
